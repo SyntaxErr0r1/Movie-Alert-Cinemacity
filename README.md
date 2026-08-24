@@ -1,110 +1,58 @@
 # Movie-Alert
 
-Get a **Telegram** ping the moment a specific **movie + theatre + date** opens
-for booking on BookMyShow. Runs on **GitHub Actions**, triggered every ~10 min
-by **cron-job.org** — nothing to keep running on your own machine.
-
-<img width="1220" height="1076" alt="Media" src="https://github.com/user-attachments/assets/3c6a8f8e-5458-42a5-a870-9001a9990de3" />
-
+This watcher sends a Telegram message when the Cinema City calendar changes
+for a movie at a selected cinema. The current configuration monitors **The
+Odyssey at Praha Flora, OC FLORA**.
 
 ## How it works
 
-1. **cron-job.org** triggers the workflow every ~10 min (GitHub's own scheduler
-   is unreliable, so we trigger it externally).
-2. `poller.py` fetches the BMS page through **ScraperAPI** (an India IP — BMS
-   blocks foreign/datacenter IPs and returns 403 otherwise).
-3. It checks whether your target is open and, on the `False → True` flip, sends
-   one Telegram message. Last-seen state lives in `state.json`.
+The poller calls Cinema City's calendar API for movie `7268s2r` and cinema
+`1052`. It stores the returned date list in `state.json` and sends one message
+when dates are added or removed. Dates that naturally expire because the
+calendar moves to the next day are ignored.
 
-## 1. Telegram bot
+The first run saves a baseline and does not send a notification. The GitHub
+Actions workflow persists the updated state file after each run.
 
-- Message **@BotFather** → `/newbot` → copy the **token**.
-- Send your new bot any message, then open
-  `https://api.telegram.org/bot<TOKEN>/getUpdates` and copy the `chat.id` — that's
-  your **chat id**.
+## Telegram setup
 
-## 2. ScraperAPI key
+1. Message `@BotFather`, create a bot, and copy its token.
+2. Send the bot a message.
+3. Open `https://api.telegram.org/bot<TOKEN>/getUpdates` and copy the
+   `chat.id` value.
+4. Add `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` as GitHub repository secrets.
 
-Sign up at **scraperapi.com** (free tier) and copy your API key.
+## Configuration
 
-## 3. Add repo secrets
+The target is configured in `config.json`:
 
-**Settings → Secrets and variables → Actions:**
+- `movie_id`: Cinema City film ID (`7268s2r` for The Odyssey).
+- `cinema_id`: Cinema City cinema ID (`1052` for Praha Flora).
+- `calendar_url_template`: the calendar API endpoint; `{until}` is replaced
+  with today's date plus `days_in_advance`.
+- `target_url`: the human-facing Cinema City booking page included in alerts.
 
-- `TELEGRAM_BOT_TOKEN`
-- `TELEGRAM_CHAT_ID`
-- `SCRAPERAPI_KEY`
+After changing the movie or cinema, delete the `calendar_dates` value from
+`state.json` (or set the file to `{}`) so the next run creates a fresh
+baseline.
 
-## 4. Configure `config.json`
+## Running locally
 
-Pick a `detector`. The page URL is built from `url_template` + `requested_date`.
-After editing, reset `state.json` to `{"available": false}`.
-
-**`venue_date`** — a specific theatre opens for a specific date (most precise):
-```json
-{
-  "detector": "venue_date",
-  "movie": "The Odyssey (IMAX 2D)",
-  "requested_date": "20260722",
-  "venue_code": "INPR",
-  "venue_label": "INOX: LUXE Phoenix Market City, Velachery",
-  "url_template": "https://in.bookmyshow.com/movies/chennai/the-odyssey/buytickets/ET00480917/{date}"
-}
-```
-Use `"venue_codes": ["PVPZ","INPR"]` to fire when *any* of several theatres open.
-
-**`bms_date`** — a date opens at *any* theatre (date-dominance on the page):
-```json
-{ "detector": "bms_date", "requested_date": "20260722",
-  "url_template": ".../buytickets/ET00480917/{date}", "min_references": 10 }
+```text
+pip install -r requirements.txt
+set TELEGRAM_BOT_TOKEN=your-token
+set TELEGRAM_CHAT_ID=your-chat-id
+python poller.py
 ```
 
-**Finding the values:** read `<city>/<slug>/<ETcode>/<date>` from the movie's
-"Book tickets" URL. For `venue_code`, open a date where the theatre *is* open and
-read its cinema link `.../cinemas/<city>/<venue-slug>/buytickets/<CODE>/<date>` —
-the `<CODE>` (e.g. `PVPZ`, `INPR`) is the value.
+The GitHub Actions workflow can be triggered manually from the Actions tab.
+It is also ready for an external cron trigger if regular polling is needed.
 
-## 5. Schedule it with cron-job.org
-
-**a. GitHub token** — *Settings → Developer settings → Personal access tokens →
-Fine-grained tokens → Generate*. Scope it to this repo, permission
-**Actions: Read and write**. Copy the token.
-
-**b. cron-job.org** — create a cronjob:
-
-| Field | Value |
-|---|---|
-| URL | `https://api.github.com/repos/<you>/<repo>/actions/workflows/booking-watch.yml/dispatches` |
-| Schedule | every 10 minutes |
-| Method | `POST` |
-| Header | `Accept: application/vnd.github+json` |
-| Header | `Authorization: Bearer <your-token>` |
-| Header | `X-GitHub-Api-Version: 2022-11-28` |
-| Body | `{"ref":"main"}` |
-
-Save, then **Run now**. GitHub returns `204`; a run appears under **Actions**.
-From then on it fires every 10 min. Keep the token only in cron-job.org.
-
-## Geo-block (why ScraperAPI)
-
-BMS only serves India and blocks datacenter IPs, so GitHub's US runners get a
-**403** on a direct request. `SCRAPERAPI_KEY` routes through an India IP and fixes
-it. Alternatives: set a `PROXY_URL` secret (India proxy), or run from a machine in
-India. It's IP/geo-based — headers alone won't get past it.
-
-## Reuse it (fork)
-
-Fork the repo, **enable Actions** on the fork (off by default), add your own
-secrets, edit `config.json`, reset `state.json`, and set up your own cron-job.org
-trigger. Each fork is independent with its own Telegram chat. No branches needed —
-date-only vs theatre-specific is just the `detector` field.
-
-## Files
+## Project files
 
 | File | Purpose |
-|------|---------|
-| `poller.py` | Fetch page, detect availability, send Telegram alert |
-| `config.json` | Your movie / date / theatre target |
-| `.github/workflows/booking-watch.yml` | The runner (dispatched by cron-job.org) |
-| `requirements.txt` | Python deps (`requests`) |
-| `state.json` | Auto-managed; tracks last-seen availability |
+| --- | --- |
+| `poller.py` | Fetches the calendar, compares state, and sends Telegram alerts |
+| `config.json` | Movie, cinema, API, and booking-page settings |
+| `state.json` | Automatically maintained last-seen calendar |
+| `.github/workflows/booking-watch.yml` | GitHub Actions runner |

@@ -1,17 +1,10 @@
 #!/usr/bin/env python3
 """
-Ticket-booking watcher.
+Movie booking watcher.
 
-Polls a URL (a BookMyShow / District showtimes page, or an internal API
-request you grabbed from your browser's DevTools) and sends a Telegram
-message the moment a given theatre appears with booking open.
-
-State is tracked in state.json so you get alerted on the *transition*
-to "available" instead of on every run.
-
-Everything is driven by config.json (and/or environment variables), so
-nothing site-specific is hardcoded -- if BookMyShow/District change their
-markup you only edit config, not code.
+The original BookMyShow detectors are still supported. The Cinema City
+detector watches the site's movie/cinema calendar API and alerts when the set
+of available dates changes.
 """
 
 import json
@@ -21,7 +14,13 @@ import sys
 import time
 import urllib.parse
 from collections import Counter
+from datetime import datetime, timedelta
 from pathlib import Path
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover - Python 3.8 fallback
+    ZoneInfo = None
 
 import requests
 
@@ -71,6 +70,8 @@ def load_config():
         "TARGET_URL": "target_url",
         "THEATRE": "theatre",
         "MOVIE": "movie",
+        "MOVIE_ID": "movie_id",
+        "CINEMA_ID": "cinema_id",
         "REQUESTED_DATE": "requested_date",
         "TELEGRAM_BOT_TOKEN": "telegram_bot_token",
         "TELEGRAM_CHAT_ID": "telegram_chat_id",
@@ -92,7 +93,9 @@ def load_config():
     detector = cfg.get("detector")
     if detector in ("bms_date", "venue_date"):
         required.append("requested_date")
-    elif detector != "venue_date":
+    elif detector == "cinemacity_calendar":
+        required.extend(["calendar_url_template", "movie_id", "cinema_id"])
+    else:
         required.append("theatre")
     if detector == "venue_date" and not (cfg.get("venue_code") or cfg.get("venue_codes")):
         sys.exit("venue_date detector needs 'venue_code' or 'venue_codes'")
@@ -159,6 +162,52 @@ def fetch(cfg):
     )
     resp.raise_for_status()
     return resp.text
+
+
+def fetch_cinemacity_calendar(cfg):
+    """Return Cinema City's currently available dates for one movie/cinema."""
+    timezone_name = cfg.get("timezone", "Europe/Prague")
+    if ZoneInfo is not None:
+        today = datetime.now(ZoneInfo(timezone_name)).date()
+    else:  # pragma: no cover - only used on old Python versions
+        today = datetime.utcnow().date()
+
+    days_in_advance = int(cfg.get("days_in_advance", 365))
+    until = today + timedelta(days=days_in_advance)
+    url = cfg["calendar_url_template"].format(until=until.isoformat())
+
+    headers = dict(DEFAULT_HEADERS)
+    headers.update(cfg.get("headers", {}))
+    response = requests.get(
+        url,
+        headers=headers,
+        params={"lang": cfg.get("language", "cs_CZ")},
+        timeout=30,
+    )
+    response.raise_for_status()
+
+    try:
+        dates = response.json().get("body", {}).get("dates")
+    except (ValueError, AttributeError) as exc:
+        raise ValueError("Cinema City calendar returned invalid JSON") from exc
+
+    if not isinstance(dates, list) or not all(
+        isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", value)
+        for value in dates
+    ):
+        raise ValueError("Cinema City calendar response did not contain date strings")
+
+    return set(dates), url, today
+
+
+def calendar_changes(previous_dates, current_dates, today):
+    """Return meaningful additions/removals, ignoring dates that simply expired."""
+    added = current_dates - previous_dates
+    removed = {
+        value for value in previous_dates - current_dates
+        if value > today.isoformat()
+    }
+    return added, removed
 
 
 def is_available_bms_date(page_text, cfg):
@@ -252,10 +301,68 @@ def is_available_generic(page_text, cfg):
 
 def main():
     cfg = load_config()
-    state = load_json(STATE_PATH, default={"available": False}) or {"available": False}
+    state = load_json(STATE_PATH, default={}) or {}
 
-    target_desc = cfg.get("theatre") or cfg.get("requested_date", "target")
+    target_desc = (
+        cfg.get("cinema_label")
+        or cfg.get("theatre")
+        or cfg.get("requested_date", "target")
+    )
     label = f"{cfg.get('movie', 'movie')} @ {target_desc}"
+
+    if cfg.get("detector") == "cinemacity_calendar":
+        try:
+            current_dates, _, today = fetch_cinemacity_calendar(cfg)
+        except (requests.RequestException, ValueError) as exc:
+            print(f"[{label}] calendar fetch failed: {exc}")
+            return 0
+
+        previous_dates = set(state.get("calendar_dates", []))
+        if "calendar_dates" not in state:
+            state.update(
+                {
+                    "calendar_dates": sorted(current_dates),
+                    "checked_at": int(time.time()),
+                }
+            )
+            save_json(STATE_PATH, state)
+            print(f"[{label}] calendar baseline saved ({len(current_dates)} dates)")
+            return 0
+
+        added, removed = calendar_changes(previous_dates, current_dates, today)
+        changed = bool(added or removed)
+        print(
+            f"[{label}] calendar_changed={changed} "
+            f"(added={len(added)}, removed={len(removed)})"
+        )
+
+        if changed:
+            def format_dates(values):
+                return ", ".join(
+                    f"{value[8:10]}-{value[5:7]}-{value[:4]}"
+                    for value in sorted(values)
+                )
+
+            details = []
+            if added:
+                details.append(f"Added: {format_dates(added)}")
+            if removed:
+                details.append(f"Removed: {format_dates(removed)}")
+            msg = (
+                "Cinema calendar changed!\n\n"
+                f"{cfg.get('movie', 'Movie')}\n"
+                f"Cinema: {target_desc}\n"
+                + "\n".join(details)
+                + f"\n\nCalendar: {cfg['target_url']}"
+            )
+            send_telegram(cfg["telegram_bot_token"], cfg["telegram_chat_id"], msg)
+            print(f"[{label}] notification sent")
+
+        if current_dates != previous_dates:
+            state["calendar_dates"] = sorted(current_dates)
+            state["checked_at"] = int(time.time())
+            save_json(STATE_PATH, state)
+        return 0
 
     try:
         page = fetch(cfg)

@@ -1,9 +1,12 @@
 {
-  "detector": "venue_date",
-  "movie": "Spider-Man: Brand New Day",
-  "requested_date": "20260730",
-  "venue_code": "INTO",
-  "venue_label": "INOX: The Marina Mall, OMR",
-  "url_template": "https://in.bookmyshow.com/movies/chennai/spiderman-brand-new-day/buytickets/ET00502600/{date}",
-  "min_references": 10
+  "detector": "cinemacity_calendar",
+  "movie": "The Odyssey",
+  "movie_id": "7268s2r",
+  "cinema_id": "1052",
+  "cinema_label": "Praha Flora, OC FLORA",
+  "timezone": "Europe/Prague",
+  "language": "cs_CZ",
+  "days_in_advance": 365,
+  "calendar_url_template": "https://www.cinemacity.cz/cz/data-api-service/v1/quickbook/10101/dates/with-film/7268s2r/until/{until}?attr=&ids=1052",
+  "target_url": "https://www.cinemacity.cz/cinemas/flora/1052#/buy-tickets-by-cinema?in-cinema=1052&at=2026-09-08&for-movie=7268s2r&view-mode=list"
 }
